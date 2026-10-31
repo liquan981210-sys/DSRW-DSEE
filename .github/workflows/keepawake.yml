@@ -1,0 +1,19 @@
+name: ka
+on:
+  schedule:
+    - cron: "0 */7 * * *"
+  workflow_dispatch:
+jobs:
+  ka:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - env:
+          K: ${{ secrets.INSTABOX_API_KEY }}
+        run: |
+          A=https://api.instabox.sh
+          M=m_agqy7oz764ua4gqxtdussokaam
+          p() { curl -s -o /dev/null -X POST -H "X-API-Key: $K" -H 'Content-Type: application/json' -d '{}' "$A/v1/machines/$M/$1"; }
+          p suspend; sleep 8; p resume; sleep 5
+          curl -s -o /dev/null -X PUT -H "X-API-Key: $K" -H 'Content-Type: application/json' -d '{"ttlSeconds":1800}' "$A/v1/machines/$M/activity-leases/keepalive"
+          echo ok
