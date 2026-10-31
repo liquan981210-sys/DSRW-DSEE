@@ -1,0 +1,14 @@
+name: diag
+on:
+  workflow_dispatch:
+jobs:
+  d:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          K: ${{ secrets.INSTABOX_API_KEY }}
+        run: |
+          echo "key_len=${#K}"
+          echo "first4=${K:0:4}"
+          curl -s -o /tmp/a.json -w "me_http=%{http_code}\n" -H "X-API-Key: $K" https://api.instabox.sh/v1/me
+          head -c 160 /tmp/a.json; echo
