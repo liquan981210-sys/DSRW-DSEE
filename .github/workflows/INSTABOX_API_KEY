@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# ============================================================================
+#  instabox-keepawake — 精简版外部保活（给 GitHub Actions / 任意 cron 用）
+#
+#  环境变量：
+#    INSTABOX_API_KEY  ibk_...（Dashboard → Profile → API keys）
+#    MACHINE           机器名，如 sdanssd
+#
+#  行为：被暂停/停止则叫醒；运行接近 8 小时上限则 suspend+resume 重置窗口；
+#        最后续一次 30 分钟活动租约。
+#  建议频率：每 20 分钟。
+# ============================================================================
+set -euo pipefail
+
+API="${INSTABOX_API_URL:-https://api.instabox.sh}"
+: "${INSTABOX_API_KEY:?缺少 INSTABOX_API_KEY}"
+: "${MACHINE:?缺少 MACHINE}"
+
+api() {
+  local m="$1" p="$2" b="${3:-}"
+  local -a h=(-H "X-API-Key: ${INSTABOX_API_KEY}")
+  if [ -n "$b" ]; then
+    curl -sS -m 30 -X "$m" "${API}${p}" "${h[@]}" \
+      -H 'Content-Type: application/json' \
+      -H "Idempotency-Key: ${m,,}-$(date +%s%N)" -d "$b"
+  else
+    curl -sS -m 30 -X "$m" "${API}${p}" "${h[@]}"
+  fi
+}
+fld() { python3 -c 'import json,sys;v=json.load(sys.stdin).get(sys.argv[1]);print("" if v is None else v)' "$1"; }
+
+MID=$(api GET /v1/machines | python3 -c '
+import json,sys
+n=sys.argv[1]
+print(next((m["id"] for m in json.load(sys.stdin).get("machines",[]) if m.get("name")==n),""))' "${MACHINE}")
+[ -n "${MID}" ] || { echo "找不到机器 ${MACHINE}"; exit 1; }
+
+info=$(api GET "/v1/machines/${MID}")
+state=$(printf '%s' "${info}" | fld state)
+started=$(printf '%s' "${info}" | fld runStartedAt)
+maxmin=$(printf '%s' "${info}" | fld maxRunMinutes)
+echo "state=${state} runStartedAt=${started:-?} maxRunMin=${maxmin:-?}"
+
+wait_running() {
+  local i s
+  for i in $(seq 1 30); do
+    sleep 3
+    s=$(api GET "/v1/machines/${MID}" | fld state)
+    [ "${s}" = "running" ] && { echo "-> running (${i}×3s)"; return 0; }
+  done
+  echo "!! 等待 running 超时"
+  return 1
+}
+
+case "${state}" in
+  suspended) echo "唤醒: resume"; api POST "/v1/machines/${MID}/resume" '{}' >/dev/null; wait_running || true ;;
+  stopped)   echo "唤醒: start";  api POST "/v1/machines/${MID}/start"  '{}' >/dev/null; wait_running || true ;;
+esac
+
+age=$(python3 -c '
+import sys,datetime
+s=sys.argv[1]
+if not s: print(0); raise SystemExit
+print(int((datetime.datetime.now(datetime.timezone.utc)-datetime.datetime.fromisoformat(s.replace("Z","+00:00"))).total_seconds()//60))' "${started}")
+echo "已运行 ${age}min"
+
+if [ "${FORCE_RESET:-0}" = "1" ] || { [ "${maxmin:-0}" -gt 0 ] && [ "${age}" -ge $(( maxmin - 60 )) ]; }; then
+  echo "接近 ${maxmin}min 上限，重置运行窗口"
+  api POST "/v1/machines/${MID}/suspend" '{}' >/dev/null
+  for i in $(seq 1 20); do sleep 2; s=$(api GET "/v1/machines/${MID}" | fld state); [ "${s}" != "running" ] && break; done
+  echo "已暂停(${s})，恢复中"
+  api POST "/v1/machines/${MID}/resume" '{}' >/dev/null
+  wait_running || true
+fi
+
+api PUT "/v1/machines/${MID}/activity-leases/keepalive" '{"ttlSeconds":1800}' >/dev/null \
+  && echo "租约已续期 30min"
+echo "done"
